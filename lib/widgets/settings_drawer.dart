@@ -6,8 +6,27 @@ import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:lucide_icons/lucide_icons.dart';
+import 'dart:convert';
 import '../theme.dart';
 import '../models/mcq_model.dart';
+
+class ApiKeyProfile {
+  final String id;
+  String label;
+  String key;
+
+  ApiKeyProfile({required this.id, required this.label, required this.key});
+
+  Map<String, dynamic> toJson() => {'id': id, 'label': label, 'key': key};
+
+  factory ApiKeyProfile.fromJson(Map<String, dynamic> json) {
+    return ApiKeyProfile(
+      id: json['id'] ?? '',
+      label: json['label'] ?? '',
+      key: json['key'] ?? '',
+    );
+  }
+}
 
 class SettingsDrawer extends StatefulWidget {
   final Function() onSettingsChanged;
@@ -38,6 +57,10 @@ class _SettingsDrawerState extends State<SettingsDrawer> {
   String _selectedDifficulty = 'medium';
   String _selectedLanguage = 'english';
 
+  // API Key profiles state
+  List<ApiKeyProfile> _keyProfiles = [];
+  String _selectedProfileId = '';
+
   @override
   void initState() {
     super.initState();
@@ -47,8 +70,40 @@ class _SettingsDrawerState extends State<SettingsDrawer> {
   // Fetch preferences from device SharedPreferences
   Future<void> _loadStoredSettings() async {
     final prefs = await SharedPreferences.getInstance();
+    
+    // Load key profiles
+    final List<String> profileJsonList = prefs.getStringList('aeroquiz_api_key_profiles') ?? [];
+    List<ApiKeyProfile> loadedProfiles = profileJsonList.map((e) {
+      return ApiKeyProfile.fromJson(jsonDecode(e));
+    }).toList();
+    
+    final String legacyKey = prefs.getString('aeroquiz_api_key') ?? '';
+    
+    // If no profiles exist, initialize with a default one, potentially migrating the legacy key
+    if (loadedProfiles.isEmpty) {
+      loadedProfiles = [
+        ApiKeyProfile(id: 'default', label: 'Primary Key', key: legacyKey)
+      ];
+      // Save it immediately
+      await prefs.setStringList(
+        'aeroquiz_api_key_profiles',
+        loadedProfiles.map((e) => jsonEncode(e.toJson())).toList(),
+      );
+    }
+    
+    String selectedId = prefs.getString('aeroquiz_selected_profile_id') ?? '';
+    // Validate if the selected id exists in our list
+    if (selectedId.isEmpty || !loadedProfiles.any((p) => p.id == selectedId)) {
+      selectedId = loadedProfiles.first.id;
+    }
+    
+    final activeProfile = loadedProfiles.firstWhere((p) => p.id == selectedId);
+    
     setState(() {
-      _apiKeyController.text = prefs.getString('aeroquiz_api_key') ?? '';
+      _keyProfiles = loadedProfiles;
+      _selectedProfileId = selectedId;
+      _apiKeyController.text = activeProfile.key;
+      
       _selectedModel = prefs.getString('aeroquiz_model') ?? 'gemini-2.5-flash';
       _questionCount = prefs.getDouble('aeroquiz_question_count') ?? 5.0;
       _selectedDifficulty = prefs.getString('aeroquiz_difficulty') ?? 'medium';
@@ -65,6 +120,207 @@ class _SettingsDrawerState extends State<SettingsDrawer> {
       await prefs.setDouble(key, value);
     }
     widget.onSettingsChanged(); // Notify root state
+  }
+
+  Future<void> _updateCurrentProfileKey(String newKey) async {
+    final prefs = await SharedPreferences.getInstance();
+    final profile = _keyProfiles.firstWhere((p) => p.id == _selectedProfileId);
+    profile.key = newKey;
+    
+    // Save profiles list
+    await prefs.setStringList(
+      'aeroquiz_api_key_profiles',
+      _keyProfiles.map((e) => jsonEncode(e.toJson())).toList(),
+    );
+    
+    // Sync active key with aeroquiz_api_key for other views
+    await prefs.setString('aeroquiz_api_key', newKey);
+    widget.onSettingsChanged(); // Notify root state
+  }
+
+  Future<void> _selectProfile(String profileId) async {
+    final prefs = await SharedPreferences.getInstance();
+    final profile = _keyProfiles.firstWhere((p) => p.id == profileId);
+    
+    await prefs.setString('aeroquiz_selected_profile_id', profileId);
+    await prefs.setString('aeroquiz_api_key', profile.key);
+    
+    setState(() {
+      _selectedProfileId = profileId;
+      _apiKeyController.text = profile.key;
+    });
+    
+    widget.onSettingsChanged(); // Notify root state
+  }
+
+  Future<void> _addProfile(String label) async {
+    if (label.trim().isEmpty) return;
+    final prefs = await SharedPreferences.getInstance();
+    final newId = DateTime.now().millisecondsSinceEpoch.toString();
+    final newProfile = ApiKeyProfile(id: newId, label: label.trim(), key: '');
+    
+    _keyProfiles.add(newProfile);
+    
+    await prefs.setStringList(
+      'aeroquiz_api_key_profiles',
+      _keyProfiles.map((e) => jsonEncode(e.toJson())).toList(),
+    );
+    
+    await _selectProfile(newId);
+  }
+
+  Future<void> _deleteProfile(String profileId) async {
+    if (_keyProfiles.length <= 1) return; // Cannot delete last profile
+    
+    final prefs = await SharedPreferences.getInstance();
+    _keyProfiles.removeWhere((p) => p.id == profileId);
+    
+    await prefs.setStringList(
+      'aeroquiz_api_key_profiles',
+      _keyProfiles.map((e) => jsonEncode(e.toJson())).toList(),
+    );
+    
+    // If the deleted profile was the active one, select the first remaining
+    if (_selectedProfileId == profileId) {
+      await _selectProfile(_keyProfiles.first.id);
+    } else {
+      setState(() {});
+    }
+  }
+
+  Future<void> _renameProfile(String profileId, String newLabel) async {
+    if (newLabel.trim().isEmpty) return;
+    final prefs = await SharedPreferences.getInstance();
+    final profile = _keyProfiles.firstWhere((p) => p.id == profileId);
+    profile.label = newLabel.trim();
+    
+    await prefs.setStringList(
+      'aeroquiz_api_key_profiles',
+      _keyProfiles.map((e) => jsonEncode(e.toJson())).toList(),
+    );
+    
+    setState(() {});
+  }
+
+  Widget _buildProfileActionButton({
+    required IconData icon,
+    required String tooltip,
+    Color color = AeroTheme.textSecondary,
+    VoidCallback? onTap,
+  }) {
+    return Tooltip(
+      message: tooltip,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(8.0),
+        child: Container(
+          padding: const EdgeInsets.all(10.0),
+          decoration: BoxDecoration(
+            color: Colors.black.withOpacity(0.2),
+            border: Border.all(color: AeroTheme.borderSideColor, width: 1.0),
+            borderRadius: BorderRadius.circular(8.0),
+          ),
+          child: Icon(
+            icon,
+            size: 16.0,
+            color: onTap == null ? AeroTheme.textMuted.withOpacity(0.5) : color,
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _showRenameProfileDialog(BuildContext context, String profileId) {
+    final profile = _keyProfiles.firstWhere((p) => p.id == profileId);
+    final controller = TextEditingController(text: profile.label);
+    
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AeroTheme.obsidianCardSolid,
+        title: const Text('Rename Profile', style: TextStyle(fontSize: 16.0, fontWeight: FontWeight.bold, color: AeroTheme.textPrimary)),
+        content: TextField(
+          controller: controller,
+          style: const TextStyle(color: AeroTheme.textPrimary, fontSize: 14.0),
+          decoration: const InputDecoration(
+            hintText: 'e.g. Work API Key',
+          ),
+          autofocus: true,
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('Cancel', style: TextStyle(color: AeroTheme.textSecondary)),
+          ),
+          TextButton(
+            onPressed: () {
+              _renameProfile(profileId, controller.text);
+              Navigator.of(ctx).pop();
+            },
+            child: const Text('Rename', style: TextStyle(color: AeroTheme.primaryIndigo)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showDeleteConfirmation(BuildContext context, String profileId) {
+    final profile = _keyProfiles.firstWhere((p) => p.id == profileId);
+    
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AeroTheme.obsidianCardSolid,
+        title: const Text('Delete Profile?', style: TextStyle(fontSize: 16.0, fontWeight: FontWeight.bold, color: AeroTheme.textPrimary)),
+        content: Text('Are you sure you want to delete the profile "${profile.label}"?', style: const TextStyle(color: AeroTheme.textSecondary, fontSize: 14.0)),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('Cancel', style: TextStyle(color: AeroTheme.textSecondary)),
+          ),
+          TextButton(
+            onPressed: () {
+              _deleteProfile(profileId);
+              Navigator.of(ctx).pop();
+            },
+            child: const Text('Delete', style: TextStyle(color: AeroTheme.incorrectRose)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showAddProfileDialog(BuildContext context) {
+    final controller = TextEditingController();
+    
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AeroTheme.obsidianCardSolid,
+        title: const Text('Add Key Profile', style: TextStyle(fontSize: 16.0, fontWeight: FontWeight.bold, color: AeroTheme.textPrimary)),
+        content: TextField(
+          controller: controller,
+          style: const TextStyle(color: AeroTheme.textPrimary, fontSize: 14.0),
+          decoration: const InputDecoration(
+            hintText: 'e.g. Personal Key',
+          ),
+          autofocus: true,
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('Cancel', style: TextStyle(color: AeroTheme.textSecondary)),
+          ),
+          TextButton(
+            onPressed: () {
+              _addProfile(controller.text);
+              Navigator.of(ctx).pop();
+            },
+            child: const Text('Add', style: TextStyle(color: AeroTheme.correctEmerald)),
+          ),
+        ],
+      ),
+    );
   }
 
   // Opens external link for obtaining free keys
@@ -151,10 +407,69 @@ class _SettingsDrawerState extends State<SettingsDrawer> {
                         ],
                       ),
                       const SizedBox(height: 8.0),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 12.0),
+                              decoration: BoxDecoration(
+                                color: Colors.black.withOpacity(0.2),
+                                border: Border.all(color: AeroTheme.borderSideColor, width: 1.0),
+                                borderRadius: BorderRadius.circular(8.0),
+                              ),
+                              child: DropdownButtonHideUnderline(
+                                child: DropdownButton<String>(
+                                  value: _selectedProfileId.isNotEmpty ? _selectedProfileId : null,
+                                  dropdownColor: AeroTheme.obsidianCardSolid,
+                                  isExpanded: true,
+                                  icon: const Icon(LucideIcons.chevronDown, color: AeroTheme.textMuted, size: 16.0),
+                                  onChanged: (String? val) {
+                                    if (val != null) {
+                                      _selectProfile(val);
+                                    }
+                                  },
+                                  items: _keyProfiles.map((profile) {
+                                    return DropdownMenuItem(
+                                      value: profile.id,
+                                      child: Text(
+                                        profile.label,
+                                        style: const TextStyle(fontSize: 13.0, color: AeroTheme.textPrimary),
+                                      ),
+                                    );
+                                  }).toList(),
+                                ),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 8.0),
+                          _buildProfileActionButton(
+                            icon: LucideIcons.edit3,
+                            tooltip: 'Rename profile',
+                            onTap: () => _showRenameProfileDialog(context, _selectedProfileId),
+                          ),
+                          const SizedBox(width: 4.0),
+                          _buildProfileActionButton(
+                            icon: LucideIcons.trash2,
+                            tooltip: 'Delete profile',
+                            color: _keyProfiles.length > 1 ? AeroTheme.incorrectRose : AeroTheme.textMuted,
+                            onTap: _keyProfiles.length > 1
+                                ? () => _showDeleteConfirmation(context, _selectedProfileId)
+                                : null,
+                          ),
+                          const SizedBox(width: 4.0),
+                          _buildProfileActionButton(
+                            icon: LucideIcons.plus,
+                            tooltip: 'Add new profile',
+                            color: AeroTheme.correctEmerald,
+                            onTap: () => _showAddProfileDialog(context),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 8.0),
                       TextField(
                         controller: _apiKeyController,
                         obscureText: _obscureKey,
-                        onChanged: (val) => _saveSetting('aeroquiz_api_key', val.trim()),
+                        onChanged: (val) => _updateCurrentProfileKey(val.trim()),
                         style: const TextStyle(color: AeroTheme.textPrimary, fontSize: 14.0),
                         decoration: InputDecoration(
                           hintText: 'AIzaSy...',
@@ -280,8 +595,8 @@ class _SettingsDrawerState extends State<SettingsDrawer> {
                         child: Slider(
                           value: _questionCount,
                           min: 3,
-                          max: 50,
-                          divisions: 47,
+                          max: 100,
+                          divisions: 97,
                           onChanged: (double val) {
                             setState(() => _questionCount = val);
                             _saveSetting('aeroquiz_question_count', val);
