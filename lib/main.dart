@@ -331,7 +331,7 @@ class _MainCoordinatorState extends State<MainCoordinator> {
           onBookmarkToggled: _toggleBookmark,
           onStartPracticeQuiz: (questions) {
             setState(() {
-              _generatedQuestions = questions;
+              _generatedQuestions = questions.map((q) => q.shuffled()).toList();
               _fileName = "Saved Bookmarks Quiz";
               _difficulty = "custom";
               _currentView = AeroView.quiz;
@@ -371,7 +371,7 @@ class _MainCoordinatorState extends State<MainCoordinator> {
         onBookmarkToggled: _toggleBookmark,
         onStartPracticeQuiz: (questions) {
           setState(() {
-            _generatedQuestions = questions;
+            _generatedQuestions = questions.map((q) => q.shuffled()).toList();
             _fileName = "Saved Bookmarks Quiz";
             _difficulty = "custom";
             _currentView = AeroView.quiz;

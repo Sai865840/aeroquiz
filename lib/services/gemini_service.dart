@@ -115,7 +115,7 @@ $pdfText
         throw Exception('Failed to find a valid MCQs array in the AI output.');
       }
 
-      return mcqList.map((q) => McqModel.fromJson(q)).toList();
+      return mcqList.map((q) => McqModel.fromJson(q).shuffled()).toList();
 
     } catch (e) {
       rethrow;
